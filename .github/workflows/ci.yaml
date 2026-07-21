@@ -1,0 +1,334 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Python quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements.lock
+
+      - name: Install runtime and development dependencies
+        run: |
+          python -m pip install --require-hashes --requirement requirements.lock
+          python -m pip install --editable ".[dev]"
+
+      - name: Verify the transitive lock satisfies project metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          lock_check_dir="$(mktemp -d)"
+          uv pip compile pyproject.toml \
+            --constraint requirements.lock \
+            --generate-hashes \
+            --python-version 3.12 \
+            --universal \
+            --only-binary=:all: \
+            --no-emit-index-url \
+            --quiet \
+            --output-file "${lock_check_dir}/requirements.lock"
+          sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' requirements.lock \
+            > "${lock_check_dir}/expected"
+          sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' \
+            "${lock_check_dir}/requirements.lock" > "${lock_check_dir}/actual"
+          diff --unified "${lock_check_dir}/expected" "${lock_check_dir}/actual"
+
+      - name: Check formatting and lint
+        run: |
+          python -m ruff format --check .
+          python -m ruff check .
+
+      - name: Check types
+        run: python -m mypy src
+
+      - name: Run tests
+        run: python -m pytest
+
+      - name: Audit locked runtime dependencies
+        run: python -m pip_audit --require-hashes --requirement requirements.lock
+
+      - name: Build source and wheel distributions
+        run: python -m build
+
+      - name: Smoke-test the built wheel
+        run: |
+          python -m pip install --force-reinstall --no-deps dist/*.whl
+          test "$(garmin-sync --version)" = "garmin-sync 0.1.0"
+          for command in auth daemon sync-once status requeue; do
+            garmin-sync "${command}" --help >/dev/null
+          done
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Scan repository history
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITLEAKS_ENABLE_COMMENTS: "false"
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+
+  container:
+    name: Compose and container
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Require every mandatory Compose setting
+        shell: bash
+        run: |
+          set -euo pipefail
+          required=(
+            DREEVE_WATCH_DIR
+            GARMIN_SYNC_START_DATE
+            GARMIN_SYNC_UID
+            GARMIN_SYNC_GID
+          )
+
+          for omitted in "${required[@]}"; do
+            environment=(
+              "PATH=${PATH}"
+              "HOME=${HOME}"
+            )
+            for name in "${required[@]}"; do
+              if [[ "${name}" == "${omitted}" ]]; then
+                continue
+              fi
+              case "${name}" in
+                DREEVE_WATCH_DIR) value="/tmp/dreeve-watch" ;;
+                GARMIN_SYNC_START_DATE) value="2024-01-01" ;;
+                GARMIN_SYNC_UID | GARMIN_SYNC_GID) value="1000" ;;
+              esac
+              environment+=("${name}=${value}")
+            done
+
+            if env --ignore-environment "${environment[@]}" \
+              docker compose --env-file /dev/null config --quiet >/dev/null 2>&1; then
+              echo "compose.yaml accepted a missing ${omitted}" >&2
+              exit 1
+            fi
+          done
+
+      - name: Validate rendered Compose security contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          data_dir="${RUNNER_TEMP}/garmin-sync-data"
+          watch_dir="${RUNNER_TEMP}/dreeve-watch"
+          install -d -m 700 "${data_dir}" "${watch_dir}"
+          export DREEVE_WATCH_DIR="${watch_dir}"
+          export GARMIN_SYNC_DATA_PATH="${data_dir}"
+          export GARMIN_SYNC_START_DATE="2024-01-01"
+          export GARMIN_SYNC_UID="$(id -u)"
+          export GARMIN_SYNC_GID="$(id -g)"
+
+          docker compose --env-file /dev/null config --quiet
+          docker compose --env-file /dev/null config --format json > "${RUNNER_TEMP}/compose.json"
+
+          jq --exit-status \
+            --arg data_dir "${data_dir}" \
+            --arg watch_dir "${watch_dir}" \
+            --arg user "${GARMIN_SYNC_UID}:${GARMIN_SYNC_GID}" '
+              .services["garmin-sync"] as $service |
+              $service.image == "ghcr.io/filippomb/dreeve-garmin-sync:0.1.0" and
+              ($service | has("container_name") | not) and
+              $service.user == $user and
+              $service.read_only == true and
+              $service.init == true and
+              $service.restart == "unless-stopped" and
+              ($service.cap_drop | index("ALL") != null) and
+              ($service.security_opt | index("no-new-privileges:true") != null) and
+              $service.environment.GARMIN_SYNC_DATA_DIR == "/data" and
+              $service.environment.GARMIN_SYNC_WATCH_DIR == "/watch" and
+              $service.environment.DREEVE_WATCH_DIR == $watch_dir and
+              $service.environment.GARMIN_SYNC_UID == ($user | split(":")[0]) and
+              $service.environment.GARMIN_SYNC_GID == ($user | split(":")[1]) and
+              $service.environment.GARMIN_SYNC_START_DATE == "2024-01-01" and
+              $service.healthcheck.test == ["CMD", "garmin-sync", "status", "--healthcheck"] and
+              $service.logging.driver == "json-file" and
+              $service.logging.options["max-size"] == "10m" and
+              $service.logging.options["max-file"] == "3" and
+              any($service.volumes[];
+                .source == $data_dir and .target == "/data" and
+                .type == "bind" and .bind.create_host_path == false) and
+              any($service.volumes[];
+                .source == $watch_dir and .target == "/watch" and
+                .type == "bind" and .bind.create_host_path == false)
+            ' "${RUNNER_TEMP}/compose.json"
+
+      - name: Build Linux AMD64 image
+        run: |
+          docker build --pull \
+            --tag ghcr.io/filippomb/dreeve-garmin-sync:0.1.0 \
+            .
+
+      - name: Inspect image defaults
+        run: |
+          docker image inspect ghcr.io/filippomb/dreeve-garmin-sync:0.1.0 |
+            jq --exit-status '
+              .[0].Config.User != "" and
+              .[0].Config.User != "0" and
+              .[0].Config.Entrypoint == ["garmin-sync"] and
+              .[0].Config.Cmd == ["daemon"] and
+              .[0].Config.Healthcheck.Test == ["CMD", "garmin-sync", "status", "--healthcheck"] and
+              .[0].Config.Labels["org.opencontainers.image.licenses"] == "MIT"
+            '
+
+      - name: Reject missing bind sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          data_dir="${RUNNER_TEMP}/missing-source-data"
+          watch_dir="${RUNNER_TEMP}/missing-source-watch"
+          install -d -m 700 "${data_dir}"
+          export DREEVE_WATCH_DIR="${watch_dir}"
+          export GARMIN_SYNC_DATA_PATH="${data_dir}"
+          export GARMIN_SYNC_START_DATE="2024-01-01"
+          export GARMIN_SYNC_UID="$(id -u)"
+          export GARMIN_SYNC_GID="$(id -g)"
+
+          if docker compose --env-file /dev/null run --rm garmin-sync --version; then
+            echo "Compose created a missing watch directory" >&2
+            exit 1
+          fi
+
+      - name: Reject root execution and a relative host watch path
+        shell: bash
+        run: |
+          set -euo pipefail
+          data_dir="${RUNNER_TEMP}/invalid-contract-data"
+          watch_dir="${RUNNER_TEMP}/invalid-contract-watch"
+          install -d -m 700 "${data_dir}" "${watch_dir}" relative-watch
+          export GARMIN_SYNC_DATA_PATH="${data_dir}"
+          export GARMIN_SYNC_START_DATE="2024-01-01"
+
+          export DREEVE_WATCH_DIR="${watch_dir}"
+          export GARMIN_SYNC_UID=0
+          export GARMIN_SYNC_GID=0
+          if docker compose --env-file /dev/null run --rm garmin-sync status; then
+            echo "Connector accepted root execution" >&2
+            exit 1
+          fi
+
+          export DREEVE_WATCH_DIR=relative-watch
+          export GARMIN_SYNC_UID="$(id -u)"
+          export GARMIN_SYNC_GID="$(id -g)"
+          if docker compose --env-file /dev/null run --rm garmin-sync status; then
+            echo "Connector accepted a relative DREEVE_WATCH_DIR" >&2
+            exit 1
+          fi
+
+      - name: Exercise hardened container and persistent data mount
+        shell: bash
+        run: |
+          set -euo pipefail
+          data_dir="${RUNNER_TEMP}/container-data"
+          watch_dir="${RUNNER_TEMP}/container-watch"
+          install -d -m 700 "${data_dir}" "${watch_dir}"
+          export DREEVE_WATCH_DIR="${watch_dir}"
+          export GARMIN_SYNC_DATA_PATH="${data_dir}"
+          export GARMIN_SYNC_START_DATE="2024-01-01"
+          export GARMIN_SYNC_UID="$(id -u)"
+          export GARMIN_SYNC_GID="$(id -g)"
+
+          docker compose --env-file /dev/null run --rm garmin-sync --version
+          docker compose --env-file /dev/null run --rm garmin-sync status
+          docker compose --env-file /dev/null run --rm --entrypoint sh garmin-sync \
+            -c 'printf persisted > /data/.container-probe'
+          docker compose --env-file /dev/null run --rm --entrypoint sh garmin-sync \
+            -c 'test "$(cat /data/.container-probe)" = persisted'
+
+          if docker compose --env-file /dev/null run --rm --entrypoint sh garmin-sync \
+            -c 'touch /app/read-only-probe'; then
+            echo "Container root filesystem is writable" >&2
+            exit 1
+          fi
+
+  arm64:
+    name: Linux ARM64 build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Build Linux ARM64 image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/arm64
+          pull: true
+          tags: dreeve-garmin-sync:arm64-ci
+          outputs: type=docker,dest=${{ runner.temp }}/dreeve-garmin-sync-arm64.tar
+          provenance: false
+          sbom: false
+
+      - name: Smoke-test Linux ARM64 under emulation
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker load --input "${RUNNER_TEMP}/dreeve-garmin-sync-arm64.tar"
+          data_dir="${RUNNER_TEMP}/arm64-data"
+          watch_dir="${RUNNER_TEMP}/arm64-watch"
+          install -d -m 700 "${data_dir}" "${watch_dir}"
+          docker run --rm --platform linux/arm64 \
+            --user "$(id -u):$(id -g)" \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777 \
+            --env DREEVE_WATCH_DIR="${watch_dir}" \
+            --env GARMIN_SYNC_UID="$(id -u)" \
+            --env GARMIN_SYNC_GID="$(id -g)" \
+            --env GARMIN_SYNC_DATA_DIR=/data \
+            --env GARMIN_SYNC_WATCH_DIR=/watch \
+            --env GARMIN_SYNC_START_DATE=2024-01-01 \
+            --mount "type=bind,src=${data_dir},dst=/data" \
+            --mount "type=bind,src=${watch_dir},dst=/watch" \
+            dreeve-garmin-sync:arm64-ci status

@@ -1,0 +1,238 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  release:
+    name: Publish signed release
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      actions: read # Confirm CI succeeded for the exact tagged commit.
+      attestations: write # Publish GitHub artifact attestations.
+      contents: write # Create the GitHub release for the existing tag.
+      id-token: write # Obtain the short-lived Sigstore signing certificate.
+      packages: write # Push the exact versioned image and its attestations.
+    env:
+      IMAGE_NAME: ghcr.io/filippomb/dreeve-garmin-sync
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate tag and package version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "${GITHUB_REF_NAME}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Release tags must use vX.Y.Z without prerelease or build suffixes" >&2
+            exit 1
+          fi
+
+          package_version="$(python - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          with Path("pyproject.toml").open("rb") as pyproject:
+              print(tomllib.load(pyproject)["project"]["version"])
+          PY
+          )"
+          if [[ "v${package_version}" != "${GITHUB_REF_NAME}" ]]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match package version ${package_version}" >&2
+            exit 1
+          fi
+
+          echo "version=${package_version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Require a GitHub-verified signed annotated tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ref_json="$(gh api "/repos/${GITHUB_REPOSITORY}/git/ref/tags/${GITHUB_REF_NAME}")"
+          if [[ "$(jq -r '.object.type' <<< "${ref_json}")" != "tag" ]]; then
+            echo "${GITHUB_REF_NAME} must be an annotated signed tag" >&2
+            exit 1
+          fi
+
+          tag_sha="$(jq -r '.object.sha' <<< "${ref_json}")"
+          tag_json="$(gh api "/repos/${GITHUB_REPOSITORY}/git/tags/${tag_sha}")"
+          if ! jq --exit-status '.verification.verified == true' <<< "${tag_json}" >/dev/null; then
+            reason="$(jq -r '.verification.reason // "unknown"' <<< "${tag_json}")"
+            echo "GitHub did not verify the tag signature: ${reason}" >&2
+            exit 1
+          fi
+          if [[ "$(jq -r '.object.type' <<< "${tag_json}")" != "commit" ]]; then
+            echo "Release tag must point directly to a commit" >&2
+            exit 1
+          fi
+          if [[ "$(jq -r '.object.sha' <<< "${tag_json}")" != "$(git rev-parse HEAD)" ]]; then
+            echo "Checked-out commit does not match the signed tag target" >&2
+            exit 1
+          fi
+
+      - name: Require tagged commit on main with successful CI
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tagged_commit="$(git rev-parse HEAD)"
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "${tagged_commit}" refs/remotes/origin/main; then
+            echo "Release tag must point to a commit on main" >&2
+            exit 1
+          fi
+
+          workflow_runs="$(gh api \
+            "/repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yaml/runs?head_sha=${tagged_commit}&status=completed&per_page=100")"
+          if ! jq --exit-status --arg sha "${tagged_commit}" \
+            '.workflow_runs | any(.head_sha == $sha and .conclusion == "success")' \
+            <<< "${workflow_runs}" >/dev/null; then
+            echo "Tagged commit has no successful CI workflow run" >&2
+            exit 1
+          fi
+
+      - name: Scan full history and release archive for secrets
+        shell: bash
+        env:
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_LINUX_X64_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          archive_name="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          archive_url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive_name}"
+          curl --fail --location --silent --show-error \
+            --output "${RUNNER_TEMP}/${archive_name}" \
+            "${archive_url}"
+          echo "${GITLEAKS_LINUX_X64_SHA256}  ${RUNNER_TEMP}/${archive_name}" |
+            sha256sum --check --strict
+          tar -xzf "${RUNNER_TEMP}/${archive_name}" \
+            --directory "${RUNNER_TEMP}" \
+            gitleaks
+
+          "${RUNNER_TEMP}/gitleaks" git --redact --no-banner .
+
+          source_archive="${RUNNER_TEMP}/dreeve-garmin-sync-${VERSION}.tar.gz"
+          extracted_archive="${RUNNER_TEMP}/release-source"
+          mkdir --mode 700 "${extracted_archive}"
+          git archive \
+            --format=tar.gz \
+            --prefix="dreeve-garmin-sync-${VERSION}/" \
+            --output="${source_archive}" \
+            HEAD
+          tar -xzf "${source_archive}" --directory "${extracted_archive}"
+          "${RUNNER_TEMP}/gitleaks" dir --redact --no-banner "${extracted_archive}"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Prepare exact image metadata
+        id: metadata
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          flavor: latest=false
+          tags: type=raw,value=${{ steps.version.outputs.version }}
+          labels: |
+            org.opencontainers.image.title=dreeve-garmin-sync
+            org.opencontainers.image.description=Garmin Connect activity synchronization add-on for Dreeve
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.documentation=https://github.com/${{ github.repository }}#readme
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
+
+      - name: Build and publish exact multi-architecture image
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          pull: true
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: ${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ github.token }}
+          format: spdx-json
+          output-file: dreeve-garmin-sync-${{ steps.version.outputs.version }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Attest build provenance
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-version: ${{ steps.version.outputs.version }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Attest SPDX SBOM
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-version: ${{ steps.version.outputs.version }}
+          sbom-path: dreeve-garmin-sync-${{ steps.version.outputs.version }}.spdx.json
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Verify published image manifest
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          docker buildx imagetools inspect \
+            "${IMAGE_NAME}:${VERSION}"
+
+      - name: Create GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          release_flags=()
+          if [[ "${VERSION}" == 0.* ]]; then
+            release_flags+=(--prerelease)
+          fi
+
+          gh release create "${GITHUB_REF_NAME}" \
+            "dreeve-garmin-sync-${VERSION}.spdx.json#SPDX JSON SBOM" \
+            --verify-tag \
+            --title "dreeve-garmin-sync ${VERSION}" \
+            --generate-notes \
+            "${release_flags[@]}"

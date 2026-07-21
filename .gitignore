@@ -1,0 +1,63 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+tokens/
+**/tokens/
+**/garmin_tokens.json
+**/oauth1_token.json
+**/oauth2_token.json
+
+# Connector state and private activity data
+/data/
+/garmin-sync-data/
+*.fit
+*.FIT
+*.tcx
+*.TCX
+*.gpx
+*.GPX
+*.zip
+*.ZIP
+*.bin
+*.tar
+*.tar.sha256
+*.tgz
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+
+# Dreeve runtime directories when repositories are placed side-by-side
+/build/
+/storage/
+/watch/
+
+# Python environments, caches, coverage, and distributions
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+dist/
+*.tar.gz
+*.whl
+*.egg-info/
+
+# Editor and operating-system metadata
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

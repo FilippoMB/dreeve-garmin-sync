@@ -1,0 +1,10 @@
+**
+!.dockerignore
+!Dockerfile
+!LICENSE
+!README.md
+!pyproject.toml
+!src/
+!src/garmin_sync/
+!src/garmin_sync/**
+!requirements.lock

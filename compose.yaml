@@ -1,0 +1,49 @@
+name: dreeve-garmin-sync
+
+services:
+  garmin-sync:
+    image: ghcr.io/filippomb/dreeve-garmin-sync:0.1.0
+    restart: unless-stopped
+    init: true
+    user: "${GARMIN_SYNC_UID:?Set GARMIN_SYNC_UID to the owning host user ID}:${GARMIN_SYNC_GID:?Set GARMIN_SYNC_GID to the owning host group ID}"
+    environment:
+      DREEVE_WATCH_DIR: "${DREEVE_WATCH_DIR:?Set DREEVE_WATCH_DIR to Dreeve's absolute watch directory}"
+      GARMIN_SYNC_UID: "${GARMIN_SYNC_UID:?Set GARMIN_SYNC_UID to the owning host user ID}"
+      GARMIN_SYNC_GID: "${GARMIN_SYNC_GID:?Set GARMIN_SYNC_GID to the owning host group ID}"
+      GARMIN_SYNC_DATA_DIR: /data
+      GARMIN_SYNC_WATCH_DIR: /watch
+      GARMIN_SYNC_INTERVAL_MINUTES: "${GARMIN_SYNC_INTERVAL_MINUTES:-60}"
+      GARMIN_SYNC_START_DATE: "${GARMIN_SYNC_START_DATE:?Set GARMIN_SYNC_START_DATE to YYYY-MM-DD}"
+      GARMIN_SYNC_OVERLAP_DAYS: "${GARMIN_SYNC_OVERLAP_DAYS:-2}"
+      GARMIN_SYNC_LOG_LEVEL: "${GARMIN_SYNC_LOG_LEVEL:-INFO}"
+      TZ: "${TZ:-Etc/UTC}"
+    volumes:
+      - type: bind
+        source: "${GARMIN_SYNC_DATA_PATH:-./data}"
+        target: /data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${DREEVE_WATCH_DIR:?Set DREEVE_WATCH_DIR to Dreeve's absolute watch directory}"
+        target: /watch
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "garmin-sync", "status", "--healthcheck"]
+      interval: 1m
+      timeout: 30s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    command: ["daemon"]
