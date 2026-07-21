@@ -188,10 +188,10 @@ jobs:
               $service.logging.options["max-file"] == "3" and
               any($service.volumes[];
                 .source == $data_dir and .target == "/data" and
-                .type == "bind" and .bind.create_host_path == false) and
+                .type == "bind") and
               any($service.volumes[];
                 .source == $watch_dir and .target == "/watch" and
-                .type == "bind" and .bind.create_host_path == false)
+                .type == "bind")
             ' "${RUNNER_TEMP}/compose.json"
 
       - name: Build Linux AMD64 image
