@@ -6,6 +6,11 @@ All notable changes are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+
+- Update Garmin Connect to 0.3.7 and refresh the matching hashed runtime lock.
+- Update development tools while retaining the established Ruff rule set.
+
 ### Fixed
 
 - Refresh the locked certificate bundle and HTTP client to address reported
