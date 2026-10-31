@@ -44,6 +44,7 @@ RUN python -m pip install \
 
 COPY --from=builder /wheels /tmp/wheels
 RUN python -m pip install --no-cache-dir --no-deps /tmp/wheels/*.whl \
+    && python -m pip check \
     && rm -rf /tmp/wheels \
     && garmin-sync --version
 
