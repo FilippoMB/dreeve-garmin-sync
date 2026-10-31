@@ -6,6 +6,12 @@ All notable changes are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- Refresh the locked certificate bundle and HTTP client to address reported
+  vulnerabilities, and reject container builds with inconsistent dependencies.
+- Allow the CI secret scanner to read pull-request commits.
+
 ## [0.1.0] - 2026-07-21
 
 First public prerelease.
