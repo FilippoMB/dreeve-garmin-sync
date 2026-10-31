@@ -226,9 +226,9 @@ curl-cffi==0.15.0 \
     --hash=sha256:bda66404010e9ed743b1b83c20c86f24fe21a9a6873e17479d6e67e29d8ded28 \
     --hash=sha256:ea0c67652bf6893d34ee0f82c944f37e488f6147e9421bef1771cc6545b02ded
     # via garminconnect
-garminconnect==0.3.6 \
-    --hash=sha256:6f90aa282976f7dff880cf53ef4f3ea0d63701fd2a1488c628a66a2a027c2143 \
-    --hash=sha256:e05782ab90e63cb9c023407899e2d12dd18132316fd84394ebecd393809d4ffe
+garminconnect==0.3.7 \
+    --hash=sha256:1c40ab3e0b07ab70510dad455d1924636bd02070f0664945e398400424e948c7 \
+    --hash=sha256:a44137b663e08d7979ca1d497f444c6ca7a09197f991199c62aab124777b5983
     # via dreeve-garmin-sync (pyproject.toml)
 idna==3.18 \
     --hash=sha256:7f952cbe720b688055e3f87de14f5c3e5fdaa8bc3928985c4077ca689de849a2 \

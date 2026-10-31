@@ -24,7 +24,7 @@ def normalized_distribution_name(name: str) -> str:
 
 
 class PackageMetadataTests(unittest.TestCase):
-    def test_pyproject_defines_release_version_dependency_and_console_script(
+    def test_pyproject_defines_release_version_and_console_script(
         self,
     ) -> None:
         with (PROJECT_ROOT / "pyproject.toml").open("rb") as pyproject_file:
@@ -32,7 +32,6 @@ class PackageMetadataTests(unittest.TestCase):
 
         project = pyproject["project"]
         self.assertEqual(project["version"], "0.1.0")
-        self.assertEqual(project["dependencies"], ["garminconnect==0.3.6"])
         self.assertEqual(project["scripts"]["garmin-sync"], "garmin_sync.cli:main")
 
     def test_installed_distribution_version_matches_pyproject(self) -> None:

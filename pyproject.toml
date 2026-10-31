@@ -49,3 +49,7 @@ ignore_missing_imports = true
 
 [tool.ruff]
 target-version = "py312"
+
+[tool.ruff.lint]
+# Keep the established rule set stable across Ruff upgrades.
+select = ["E4", "E7", "E9", "F"]
