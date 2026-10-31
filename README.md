@@ -37,7 +37,7 @@ the project does not update or back itself up.
 - Docker Engine with the Docker Compose plugin.
 - A running Dreeve v5 installation configured with `IMPORT_MODE=files`, including
   its daemon and an existing host `watch/` directory. See Dreeve's
-  [file-import documentation](https://github.com/dreeveapp/dreeve/blob/v5.0.1/docs/importing/file-import.md).
+  [file-import documentation](https://github.com/dreeveapp/dreeve/blob/v5.0.2/docs/importing/file-import.md).
 - The nonzero numeric UID and GID that should own connector data and delivered FIT
   files. Use the same non-root identity as Dreeve's daemon, or otherwise ensure
   that Dreeve can read files created with private permissions.
